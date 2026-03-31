@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./claude-code-hub-backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - app_data:/data
+    environment:
+      - DB_PATH=/data/app.db
+      - JWT_SECRET=${JWT_SECRET:-claude-code-hub-change-me-in-production}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./claude-code-hub-frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  app_data:
