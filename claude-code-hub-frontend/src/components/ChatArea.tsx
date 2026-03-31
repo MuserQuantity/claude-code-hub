@@ -2,9 +2,10 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, Square, AlertCircle } from "lucide-react";
+import { Send, Square, AlertCircle, FolderOpen, Upload } from "lucide-react";
 import MessageBubble from "./MessageBubble";
-import { createChatWebSocket, type Message } from "@/lib/api";
+import FileManager from "./FileManager";
+import { createChatWebSocket, uploadFile, type Message } from "@/lib/api";
 
 interface StreamingToolCall {
   id: string;
@@ -22,17 +23,21 @@ interface ChatAreaProps {
   sessionId: string | null;
   messages: Message[];
   onMessageSent: () => void;
+  onSessionTitleChanged?: () => void;
   hasApiKey: boolean;
 }
 
-export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey }: ChatAreaProps) {
+export default function ChatArea({ sessionId, messages, onMessageSent, onSessionTitleChanged, hasApiKey }: ChatAreaProps) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [streamingToolCalls, setStreamingToolCalls] = useState<StreamingToolCall[]>([]);
   const [streamingToolResults, setStreamingToolResults] = useState<StreamingToolResult[]>([]);
+  const [streamingToolOutputs, setStreamingToolOutputs] = useState<Record<string, string>>({});
   const [streamingThinking, setStreamingThinking] = useState("");
   const [error, setError] = useState("");
+  const [fileManagerOpen, setFileManagerOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -71,6 +76,7 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
     setStreamingText("");
     setStreamingToolCalls([]);
     setStreamingToolResults([]);
+    setStreamingToolOutputs({});
     setStreamingThinking("");
 
     const token = localStorage.getItem("token");
@@ -105,11 +111,24 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
                 { id: data.tool_id, name: data.tool_name, input: data.input },
               ]);
               break;
+            case "tool_output":
+              // Real-time streaming output from bash
+              setStreamingToolOutputs((prev) => ({
+                ...prev,
+                [data.tool_id]: (prev[data.tool_id] || "") + data.content,
+              }));
+              break;
             case "tool_result":
               setStreamingToolResults((prev) => [
                 ...prev,
                 { tool_id: data.tool_id, tool_name: data.tool_name, output: data.output },
               ]);
+              break;
+            case "session_title":
+              // Auto-title was updated on the server
+              if (onSessionTitleChanged) {
+                onSessionTitleChanged();
+              }
               break;
             case "error":
               setError(data.content);
@@ -121,6 +140,7 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
               setStreamingText("");
               setStreamingToolCalls([]);
               setStreamingToolResults([]);
+              setStreamingToolOutputs({});
               setStreamingThinking("");
               onMessageSent();
               break;
@@ -145,12 +165,40 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
       setError(err instanceof Error ? err.message : "Failed to connect");
       setIsStreaming(false);
     }
-  }, [input, sessionId, isStreaming, hasApiKey, onMessageSent]);
+  }, [input, sessionId, isStreaming, hasApiKey, onMessageSent, onSessionTitleChanged]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  };
+
+  // Drag and drop file upload
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setDragOver(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (!sessionId) return;
+
+    const files = e.dataTransfer.files;
+    if (files.length === 0) return;
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        await uploadFile(files[i]);
+      }
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed");
     }
   };
 
@@ -165,7 +213,12 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
   }
 
   return (
-    <div className="flex-1 flex flex-col bg-zinc-950">
+    <div
+      className={`flex-1 flex flex-col bg-zinc-950 relative ${dragOver ? "ring-2 ring-orange-500 ring-inset" : ""}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {/* Messages */}
       <ScrollArea className="flex-1" ref={scrollRef}>
         <div className="max-w-3xl mx-auto py-4">
@@ -187,6 +240,7 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
               content={streamingText}
               toolCalls={streamingToolCalls}
               toolResults={streamingToolResults}
+              toolOutputs={streamingToolOutputs}
               thinking={streamingThinking}
               isStreaming
             />
@@ -199,6 +253,16 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
           )}
         </div>
       </ScrollArea>
+
+      {/* Drag overlay */}
+      {dragOver && (
+        <div className="absolute inset-0 bg-orange-500/10 flex items-center justify-center z-10 pointer-events-none">
+          <div className="bg-zinc-900 border-2 border-dashed border-orange-500 rounded-lg px-8 py-6 text-center">
+            <Upload className="h-8 w-8 text-orange-500 mx-auto mb-2" />
+            <p className="text-zinc-300 text-sm">Drop files to upload to workspace</p>
+          </div>
+        </div>
+      )}
 
       {/* Error bar */}
       {error && (
@@ -214,6 +278,15 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
       {/* Input area */}
       <div className="border-t border-zinc-800 p-4">
         <div className="max-w-3xl mx-auto flex gap-2">
+          <Button
+            size="icon"
+            variant="ghost"
+            className="shrink-0 text-zinc-500 hover:text-zinc-300"
+            onClick={() => setFileManagerOpen(true)}
+            title="File Manager"
+          >
+            <FolderOpen className="h-5 w-5" />
+          </Button>
           <Textarea
             ref={textareaRef}
             value={input}
@@ -244,6 +317,9 @@ export default function ChatArea({ sessionId, messages, onMessageSent, hasApiKey
           )}
         </div>
       </div>
+
+      {/* File Manager Modal */}
+      <FileManager open={fileManagerOpen} onClose={() => setFileManagerOpen(false)} />
     </div>
   );
 }

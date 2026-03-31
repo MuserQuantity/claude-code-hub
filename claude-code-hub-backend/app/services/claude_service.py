@@ -7,7 +7,7 @@ from typing import AsyncGenerator, Any
 import anthropic
 
 from app.tools.base import get_tool_definitions
-from app.tools.executor import execute_tool
+from app.tools.executor import execute_tool, execute_tool_streaming
 
 
 DEFAULT_SYSTEM_PROMPT = """You are Claude Code, an AI assistant that helps users with software engineering tasks.
@@ -142,12 +142,23 @@ async def stream_chat(
 
             api_messages.append({"role": "assistant", "content": assistant_content})
 
-            # Execute each tool and collect results
+            # Execute each tool and collect results (with streaming for bash)
             tool_results_content = []
             tool_results_for_client = []
 
             for tc in collected_tool_calls:
-                result = await execute_tool(tc["name"], tc["input"], work_dir)
+                result = ""
+                async for event in execute_tool_streaming(tc["name"], tc["input"], work_dir):
+                    if event["type"] == "output_chunk":
+                        # Stream real-time output to client
+                        yield {
+                            "type": "tool_output",
+                            "tool_id": tc["id"],
+                            "tool_name": tc["name"],
+                            "content": event["content"],
+                        }
+                    elif event["type"] == "result":
+                        result = event["content"]
 
                 tool_results_content.append({
                     "type": "tool_result",

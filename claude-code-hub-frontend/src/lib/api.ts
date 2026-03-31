@@ -116,4 +116,40 @@ export function createChatWebSocket(sessionId: string): WebSocket {
   return new WebSocket(`${wsUrl}/api/chat/ws/${sessionId}`);
 }
 
+// Files
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+export async function listFiles(path: string = "") {
+  const params = path ? `?path=${encodeURIComponent(path)}` : "";
+  return request<{ path: string; entries: FileEntry[] }>(`/api/files/list${params}`);
+}
+
+export async function uploadFile(file: File, path: string = "") {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (path) formData.append("path", path);
+
+  const token = getToken();
+  const res = await fetch(`${API_URL}/api/files/upload${path ? `?path=${encodeURIComponent(path)}` : ""}`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Upload failed");
+  }
+  return res.json() as Promise<{ filename: string; path: string; size: number }>;
+}
+
+export function getDownloadUrl(path: string): string {
+  const token = getToken();
+  return `${API_URL}/api/files/download?path=${encodeURIComponent(path)}&token=${token}`;
+}
+
 export { API_URL };

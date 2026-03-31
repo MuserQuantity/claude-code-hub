@@ -5,7 +5,7 @@ import glob as glob_module
 import os
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 
 MAX_OUTPUT_CHARS = 50000
@@ -50,7 +50,110 @@ async def execute_tool(tool_name: str, tool_input: dict[str, Any], work_dir: str
         return f"Error: {type(e).__name__}: {e}"
 
 
+async def execute_tool_streaming(
+    tool_name: str, tool_input: dict[str, Any], work_dir: str
+) -> AsyncGenerator[dict, None]:
+    """Execute a tool and yield streaming output chunks for bash, or a single result for others.
+    
+    Yields: {"type": "output_chunk", "content": "..."} during execution
+    Final yield: {"type": "result", "content": "..."} with the complete output
+    """
+    os.makedirs(work_dir, exist_ok=True)
+
+    if tool_name == "bash":
+        async for event in _exec_bash_streaming(tool_input, work_dir):
+            yield event
+    else:
+        # Non-streaming tools: execute and yield single result
+        result = await execute_tool(tool_name, tool_input, work_dir)
+        yield {"type": "result", "content": result}
+
+
+async def _exec_bash_streaming(tool_input: dict, work_dir: str) -> AsyncGenerator[dict, None]:
+    """Execute bash command with real-time output streaming."""
+    command = tool_input.get("command", "")
+    if not command:
+        yield {"type": "result", "content": "Error: no command provided"}
+        return
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=work_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "HOME": work_dir},
+        )
+
+        full_output = ""
+        total_chars = 0
+        truncated = False
+
+        async def read_stream(stream: asyncio.StreamReader, prefix: str = ""):
+            nonlocal full_output, total_chars, truncated
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace")
+                chunk = f"{prefix}{text}" if prefix else text
+                total_chars += len(chunk)
+                if total_chars > MAX_OUTPUT_CHARS:
+                    if not truncated:
+                        truncated = True
+                        yield {"type": "output_chunk", "content": "\n... (output truncated)"}
+                    continue
+                full_output += chunk
+                yield {"type": "output_chunk", "content": chunk}
+
+        # Read stdout and stderr concurrently, yielding chunks
+        stdout_chunks: list[dict] = []
+        stderr_chunks: list[dict] = []
+
+        async def collect_stdout():
+            async for chunk in read_stream(proc.stdout):
+                stdout_chunks.append(chunk)
+
+        async def collect_stderr():
+            async for chunk in read_stream(proc.stderr, "STDERR: "):
+                stderr_chunks.append(chunk)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(collect_stdout(), collect_stderr()),
+                timeout=BASH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            timeout_msg = f"Error: command timed out after {BASH_TIMEOUT}s"
+            yield {"type": "output_chunk", "content": timeout_msg + "\n"}
+            yield {"type": "result", "content": full_output + "\n" + timeout_msg}
+            return
+
+        # Yield collected chunks in order (stdout first, then stderr)
+        for chunk in stdout_chunks:
+            yield chunk
+        for chunk in stderr_chunks:
+            yield chunk
+
+        await proc.wait()
+        exit_info = f"Exit code: {proc.returncode}"
+        yield {"type": "output_chunk", "content": exit_info + "\n"}
+
+        full_output += f"\n{exit_info}"
+        yield {"type": "result", "content": full_output.strip()}
+
+    except Exception as e:
+        error_msg = f"Error: {type(e).__name__}: {e}"
+        yield {"type": "output_chunk", "content": error_msg + "\n"}
+        yield {"type": "result", "content": error_msg}
+
+
 async def _exec_bash(tool_input: dict, work_dir: str) -> str:
+    """Execute bash command (non-streaming fallback)."""
     command = tool_input.get("command", "")
     if not command:
         return "Error: no command provided"

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -23,12 +23,54 @@ interface MessageBubbleProps {
   content: string;
   toolCalls?: ToolCall[] | string | null;
   toolResults?: ToolResult[] | string | null;
+  toolOutputs?: Record<string, string>;
   thinking?: string | null;
   isStreaming?: boolean;
 }
 
-function ToolCallBlock({ call, result }: { call: ToolCall; result?: ToolResult }) {
-  const [expanded, setExpanded] = useState(false);
+function TerminalOutput({ output }: { output: string }) {
+  const scrollRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [output]);
+
+  const display = output.length > 3000 ? output.slice(0, 3000) + "\n... (truncated)" : output;
+
+  // Color exit codes
+  const lines = display.split("\n");
+  return (
+    <pre
+      ref={scrollRef}
+      className="px-3 py-2 text-xs font-mono whitespace-pre-wrap max-h-64 overflow-auto bg-zinc-950"
+    >
+      {lines.map((line, i) => {
+        let className = "text-zinc-300";
+        if (line.startsWith("STDERR:")) className = "text-red-400";
+        else if (line.startsWith("Exit code: 0")) className = "text-green-400";
+        else if (line.match(/^Exit code: \d+/)) className = "text-red-400";
+        else if (line.startsWith("Error:")) className = "text-red-400";
+        else if (line.startsWith("Successfully")) className = "text-green-400";
+        return (
+          <span key={i} className={className}>
+            {line}
+            {i < lines.length - 1 ? "\n" : ""}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
+function ToolCallBlock({ call, result, streamingOutput, autoExpand }: { call: ToolCall; result?: ToolResult; streamingOutput?: string; autoExpand?: boolean }) {
+  const [expanded, setExpanded] = useState(autoExpand || false);
+
+  // Auto-expand when streaming (autoExpand changes)
+  useEffect(() => {
+    if (autoExpand) setExpanded(true);
+  }, [autoExpand]);
   const [copied, setCopied] = useState(false);
 
   const toolIcon = call.name === "bash" ? (
@@ -89,13 +131,23 @@ function ToolCallBlock({ call, result }: { call: ToolCall; result?: ToolResult }
               >
                 {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
               </Button>
-              <pre className="px-3 py-2 text-xs text-zinc-300 font-mono whitespace-pre-wrap max-h-64 overflow-auto bg-zinc-950">
-                {result.output.length > 3000 ? result.output.slice(0, 3000) + "\n... (truncated)" : result.output}
-              </pre>
+              <TerminalOutput output={result.output} />
             </div>
           )}
-          {!result && (
-            <div className="px-3 py-2 text-xs text-zinc-500">Running...</div>
+          {!result && streamingOutput && (
+            <div className="relative">
+              <TerminalOutput output={streamingOutput} />
+              <div className="px-3 py-1 text-xs text-zinc-500 flex items-center gap-2 border-t border-zinc-800">
+                <div className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-pulse" />
+                Running...
+              </div>
+            </div>
+          )}
+          {!result && !streamingOutput && (
+            <div className="px-3 py-2 text-xs text-zinc-500 flex items-center gap-2">
+              <div className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-pulse" />
+              Running...
+            </div>
           )}
         </div>
       )}
@@ -103,7 +155,7 @@ function ToolCallBlock({ call, result }: { call: ToolCall; result?: ToolResult }
   );
 }
 
-export default function MessageBubble({ role, content, toolCalls, toolResults, thinking, isStreaming }: MessageBubbleProps) {
+export default function MessageBubble({ role, content, toolCalls, toolResults, toolOutputs, thinking, isStreaming }: MessageBubbleProps) {
   const [showThinking, setShowThinking] = useState(false);
 
   const parsedToolCalls: ToolCall[] = toolCalls
@@ -150,6 +202,8 @@ export default function MessageBubble({ role, content, toolCalls, toolResults, t
                 result={parsedToolResults.find(
                   (tr) => tr.tool_id === tc.id || tr.tool_name === tc.name
                 )}
+                streamingOutput={tc.id && toolOutputs ? toolOutputs[tc.id] : undefined}
+                autoExpand={isStreaming}
               />
             ))}
           </div>
