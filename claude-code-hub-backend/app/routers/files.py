@@ -24,7 +24,8 @@ def _resolve_safe_path(workspace: str, relative_path: str) -> str:
         resolved = os.path.realpath(relative_path)
     else:
         resolved = os.path.realpath(os.path.join(workspace, relative_path))
-    if not resolved.startswith(os.path.realpath(workspace)):
+    workspace_real = os.path.realpath(workspace)
+    if resolved != workspace_real and not resolved.startswith(workspace_real + os.sep):
         raise HTTPException(status_code=403, detail="Access denied: path outside workspace")
     return resolved
 
@@ -94,10 +95,15 @@ async def upload_file(
 @router.get("/download")
 async def download_file(
     path: str,
-    current_user: dict = Depends(get_current_user),
+    token: str = "",
 ):
-    """Download a file from the user's workspace."""
-    workspace = _get_workspace(current_user["id"])
+    """Download a file from the user's workspace. Accepts token as query param for browser downloads."""
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    from app.auth import decode_token
+    payload = decode_token(token)
+    user_id = payload["sub"]
+    workspace = _get_workspace(user_id)
     target = _resolve_safe_path(workspace, path)
 
     if not os.path.exists(target):

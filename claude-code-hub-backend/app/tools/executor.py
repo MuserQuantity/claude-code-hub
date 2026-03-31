@@ -20,7 +20,7 @@ def _resolve_path(work_dir: str, path: str) -> str:
         resolved = os.path.realpath(os.path.join(work_dir, path))
 
     work_dir_real = os.path.realpath(work_dir)
-    if not resolved.startswith(work_dir_real):
+    if resolved != work_dir_real and not resolved.startswith(work_dir_real + os.sep):
         raise PermissionError(f"Access denied: path '{path}' is outside the working directory")
     return resolved
 
@@ -88,8 +88,9 @@ async def _exec_bash_streaming(tool_input: dict, work_dir: str) -> AsyncGenerato
         full_output = ""
         total_chars = 0
         truncated = False
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
-        async def read_stream(stream: asyncio.StreamReader, prefix: str = ""):
+        async def read_to_queue(stream: asyncio.StreamReader, prefix: str = ""):
             nonlocal full_output, total_chars, truncated
             while True:
                 line = await stream.readline()
@@ -101,29 +102,28 @@ async def _exec_bash_streaming(tool_input: dict, work_dir: str) -> AsyncGenerato
                 if total_chars > MAX_OUTPUT_CHARS:
                     if not truncated:
                         truncated = True
-                        yield {"type": "output_chunk", "content": "\n... (output truncated)"}
+                        await queue.put({"type": "output_chunk", "content": "\n... (output truncated)"})
                     continue
                 full_output += chunk
-                yield {"type": "output_chunk", "content": chunk}
+                await queue.put({"type": "output_chunk", "content": chunk})
 
-        # Read stdout and stderr concurrently, yielding chunks
-        stdout_chunks: list[dict] = []
-        stderr_chunks: list[dict] = []
+        async def produce():
+            await asyncio.gather(
+                read_to_queue(proc.stdout),
+                read_to_queue(proc.stderr, "STDERR: "),
+            )
+            await queue.put(None)  # sentinel
 
-        async def collect_stdout():
-            async for chunk in read_stream(proc.stdout):
-                stdout_chunks.append(chunk)
-
-        async def collect_stderr():
-            async for chunk in read_stream(proc.stderr, "STDERR: "):
-                stderr_chunks.append(chunk)
+        producer = asyncio.create_task(produce())
 
         try:
-            await asyncio.wait_for(
-                asyncio.gather(collect_stdout(), collect_stderr()),
-                timeout=BASH_TIMEOUT,
-            )
+            while True:
+                item = await asyncio.wait_for(queue.get(), timeout=BASH_TIMEOUT)
+                if item is None:
+                    break
+                yield item
         except asyncio.TimeoutError:
+            producer.cancel()
             try:
                 proc.kill()
             except ProcessLookupError:
@@ -132,12 +132,6 @@ async def _exec_bash_streaming(tool_input: dict, work_dir: str) -> AsyncGenerato
             yield {"type": "output_chunk", "content": timeout_msg + "\n"}
             yield {"type": "result", "content": full_output + "\n" + timeout_msg}
             return
-
-        # Yield collected chunks in order (stdout first, then stderr)
-        for chunk in stdout_chunks:
-            yield chunk
-        for chunk in stderr_chunks:
-            yield chunk
 
         await proc.wait()
         exit_info = f"Exit code: {proc.returncode}"
