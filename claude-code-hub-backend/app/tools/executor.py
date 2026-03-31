@@ -4,6 +4,7 @@ import asyncio
 import glob as glob_module
 import os
 import json
+import time
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -115,10 +116,14 @@ async def _exec_bash_streaming(tool_input: dict, work_dir: str) -> AsyncGenerato
             await queue.put(None)  # sentinel
 
         producer = asyncio.create_task(produce())
+        deadline = time.monotonic() + BASH_TIMEOUT
 
         try:
             while True:
-                item = await asyncio.wait_for(queue.get(), timeout=BASH_TIMEOUT)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                item = await asyncio.wait_for(queue.get(), timeout=remaining)
                 if item is None:
                     break
                 yield item
