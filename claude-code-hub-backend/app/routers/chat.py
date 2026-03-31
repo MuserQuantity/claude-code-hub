@@ -150,10 +150,29 @@ async def _process_message(
             "INSERT INTO messages (id, session_id, role, content) VALUES (?, ?, 'user', ?)",
             (user_msg_id, session_id, content),
         )
-        await db.execute(
-            "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (session_id,),
+        # Auto-title: if session title is still "New Chat", generate from first message
+        cursor = await db.execute(
+            "SELECT title FROM sessions WHERE id = ?", (session_id,)
         )
+        session_row = await cursor.fetchone()
+        if session_row and session_row["title"] == "New Chat":
+            auto_title = content.strip().replace("\n", " ")[:50]
+            if len(content.strip()) > 50:
+                auto_title += "..."
+            await db.execute(
+                "UPDATE sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (auto_title, session_id),
+            )
+            # Notify client about the title change
+            try:
+                await websocket.send_json({"type": "session_title", "title": auto_title})
+            except Exception:
+                pass
+        else:
+            await db.execute(
+                "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session_id,),
+            )
         await db.commit()
     finally:
         await db.close()
@@ -191,6 +210,10 @@ async def _process_message(
                 "name": event["tool_name"],
                 "input": event["input"],
             })
+            await websocket.send_json(event)
+
+        elif event_type == "tool_output":
+            # Real-time streaming output from bash commands
             await websocket.send_json(event)
 
         elif event_type == "tool_result":

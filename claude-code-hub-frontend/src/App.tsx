@@ -128,6 +128,7 @@ function MainApp() {
         sessionId={activeSessionId}
         messages={messages}
         onMessageSent={handleMessageSent}
+        onSessionTitleChanged={loadSessions}
         hasApiKey={user.has_api_key}
       />
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
